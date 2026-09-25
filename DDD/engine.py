@@ -383,22 +383,23 @@ class Engine(nn.Module):
     @classmethod
     def load(cls, model_dir, device="cuda", dtype=torch.float16, batch_size=1):
         with open(os.path.join(model_dir, "config.json")) as handle:
-            config = _Config(json.load(handle))
+            raw_cfg = json.load(handle)
+        config = _Config(raw_cfg)
         engine = cls(config)
+    
         weights = load_file(os.path.join(model_dir, "model.safetensors"), device="cpu")
+    
+        quant_cfg = raw_cfg.get("quantization_config")
+        if quant_cfg and quant_cfg.get("quant_method") == "compressed-tensors":
+            print("[engine] تم اكتشاف checkpoint مكوانتز (compressed-tensors) — جاري الـ dequantize لـ fp16")
+            weights = dequantize_state_dict(weights, quant_cfg, compute_dtype=dtype)
+    
         missing, unexpected = engine.load_state_dict(weights, strict=False)
         if unexpected or set(missing) - {"lm_head.weight"}:
             raise RuntimeError(f"weight mismatch: missing={missing} unexpected={unexpected}")
         engine.lm_head.weight = engine.model.embed_tokens.weight
         engine._batch_size = batch_size
         return engine.to(dtype).to(device).eval()
-
-    def new_cache(self, batch_size=None):
-        batch_size = batch_size or getattr(self, "_batch_size", 1)
-        return KVCache(
-            self.config.num_hidden_layers, batch_size, self.config.num_key_value_heads,
-            self.config.head_dim, self.lm_head.weight.device, self.lm_head.weight.dtype,
-        )
 
     def forward(self, input_ids, past_key_values=None):
         if past_key_values is None:

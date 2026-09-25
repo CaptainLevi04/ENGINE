@@ -20,6 +20,75 @@ from torch import nn
 from safetensors.torch import load_file
 from torch.utils.cpp_extension import load as _kernel_load
 
+# ---- compressed-tensors "pack-quantized" support (INT4 AWQ W4A16 asym) ----
+
+def _unpack_int_from_int32(packed: torch.Tensor, num_bits: int,
+                            unpacked_size: int, packed_dim: int) -> torch.Tensor:
+    """يفك التعبئة اللي بيعملها compressed-tensors: كل int32 فيه (32//num_bits) قيمة
+    معبأة على المحور packed_dim (0 أو 1). بيرجع int8 بالمدى الموقّع الأصلي."""
+    if packed_dim == 0:
+        return _unpack_int_from_int32(
+            packed.t().contiguous(), num_bits, unpacked_size, packed_dim=1
+        ).t().contiguous()
+
+    pack_factor = 32 // num_bits
+    mask = (1 << num_bits) - 1
+    rows, packed_cols = packed.shape
+    out = torch.zeros((rows, packed_cols * pack_factor), dtype=torch.int32, device=packed.device)
+    for i in range(pack_factor):
+        out[:, i::pack_factor] = (packed >> (num_bits * i)) & mask
+    out = out[:, :unpacked_size]
+    offset = 1 << (num_bits - 1)          # 8 للـ 4-bit: بيرجع القيمة من [0..15] لـ [-8..7]
+    return (out - offset).to(torch.int8)
+
+
+def _weight_quant_args(quant_cfg: dict) -> dict:
+    for group in quant_cfg.get("config_groups", {}).values():
+        if "Linear" in (group.get("targets") or []):
+            return group["weights"]
+    raise ValueError("quantization_config has no Linear weight scheme")
+
+
+def dequantize_state_dict(weights: dict, quant_cfg: dict,
+                           compute_dtype=torch.float16) -> dict:
+    """بياخد الـ state_dict الخام (فيه weight_packed/weight_scale/weight_zero_point)
+    وبيرجّع state_dict فيه 'weight' fp16 عادي لكل Linear مكوانتز، زي أي checkpoint عادي."""
+    w_args = _weight_quant_args(quant_cfg)
+    num_bits = w_args["num_bits"]
+    group_size = w_args.get("group_size")
+    symmetric = w_args.get("symmetric", True)
+
+    weights = dict(weights)
+    for pk in [k for k in weights if k.endswith(".weight_packed")]:
+        prefix = pk[: -len(".weight_packed")]
+
+        packed = weights.pop(pk)
+        scale = weights.pop(prefix + ".weight_scale").to(torch.float32)
+        shape = weights.pop(prefix + ".weight_shape").tolist()
+        out_features, in_features = int(shape[0]), int(shape[1])
+        gs = group_size if group_size and group_size > 0 else in_features
+        num_groups = scale.shape[-1]
+
+        w_int = _unpack_int_from_int32(packed, num_bits, in_features, packed_dim=1)
+
+        zp_key = prefix + ".weight_zero_point"
+        if not symmetric and zp_key in weights:
+            zp_packed = weights.pop(zp_key)
+            zp_int = _unpack_int_from_int32(zp_packed, num_bits, out_features, packed_dim=0)
+        else:
+            weights.pop(zp_key, None)
+            zp_int = torch.zeros((out_features, num_groups), dtype=torch.int8)
+
+        weights.pop(prefix + ".weight_g_idx", None)  # actorder=null عندنا، مش مستخدم
+
+        scale_full = scale.repeat_interleave(gs, dim=1)[:, :in_features]
+        zp_full = zp_int.to(torch.float32).repeat_interleave(gs, dim=1)[:, :in_features]
+
+        dequant = (w_int.to(torch.float32) - zp_full) * scale_full
+        weights[prefix + ".weight"] = dequant.to(compute_dtype).contiguous()
+
+    return weights
+
 _DIR = os.path.dirname(os.path.abspath(__file__))
 
 rmsnorm_naive = _kernel_load(

@@ -14,11 +14,22 @@ def _find_model_dir() -> str:
     env = os.environ.get("QWEN_MODEL_DIR")
     if env:
         return env
+
     for name in ("Qwen2.5-0.5B", "qwen2-model"):
         for d in (os.path.join(_DIR, name), os.path.join(os.path.dirname(_DIR), name)):
             if os.path.exists(os.path.join(d, "model.safetensors")):
                 return d
-    return os.path.join(os.path.dirname(_DIR), "Qwen2.5-0.5B")
+
+    repo_id = os.environ.get("QWEN_HF_REPO", "Qwen/Qwen2.5-0.5B")
+    token = os.environ.get("QWEN_HF_TOKEN") or os.environ.get("HF_TOKEN")
+
+    from huggingface_hub import snapshot_download
+    print(f"[run.py] مفيش موديل لوكال، جاري التحميل من HF: {repo_id}")
+    return snapshot_download(
+        repo_id=repo_id,
+        allow_patterns=["config.json", "model.safetensors", "tokenizer.json"],
+        token=token,
+    )
 
 
 MODEL_DIR = _find_model_dir()

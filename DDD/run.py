@@ -15,10 +15,36 @@ def _find_model_dir() -> str:
     if env:
         return env
 
-    for name in ("Qwen2.5-0.5B", "qwen2-model"):
+    # 1) دور لوكال: أي فولدر جنب run.py أو فوقه فيه model.safetensors + config.json
+    known_names = ("Qwen2.5-0.5B", "qwen2-model",
+                   "Qwen2.5-0.5B-AWQ-W4A16-ASYM-hq-tied-embed", "quantized-model")
+    for name in known_names:
         for d in (os.path.join(_DIR, name), os.path.join(os.path.dirname(_DIR), name)):
             if os.path.exists(os.path.join(d, "model.safetensors")):
                 return d
+
+    for base in (_DIR, os.path.dirname(_DIR)):
+        if os.path.isdir(base):
+            for entry in os.listdir(base):
+                d = os.path.join(base, entry)
+                if os.path.isdir(d) and os.path.exists(os.path.join(d, "model.safetensors")) \
+                        and os.path.exists(os.path.join(d, "config.json")):
+                    return d
+
+    # 2) مفيش لوكال -> نزّل من HF (الكوانتايزد افتراضيًا، أصغر وأسرع في التحميل)
+    use_quant = os.environ.get("QWEN_USE_QUANTIZED", "1") != "0"
+    default_repo = ("Amr04/Qwen2.5-0.5B-AWQ-W4A16-tied-embed-asym-hq"
+                     if use_quant else "Qwen/Qwen2.5-0.5B")
+    repo_id = os.environ.get("QWEN_HF_REPO", default_repo)
+    token = os.environ.get("QWEN_HF_TOKEN") or os.environ.get("HF_TOKEN")
+
+    from huggingface_hub import snapshot_download
+    print(f"[run.py] مفيش موديل لوكال، جاري التحميل من HF: {repo_id}")
+    return snapshot_download(
+        repo_id=repo_id,
+        allow_patterns=["config.json", "model.safetensors", "tokenizer.json"],
+        token=token,
+    )
 
     repo_id = os.environ.get("QWEN_HF_REPO", "Qwen/Qwen2.5-0.5B")
     token = os.environ.get("QWEN_HF_TOKEN") or os.environ.get("HF_TOKEN")

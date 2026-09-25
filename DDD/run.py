@@ -36,15 +36,6 @@ MODEL_DIR = _find_model_dir()
 
 
 def main() -> None:
-    if not os.path.exists(os.path.join(MODEL_DIR, "model.safetensors")):
-        sys.exit(
-            f"weights not found under {MODEL_DIR}.\n"
-            f"Download them with:\n"
-            f"  huggingface-cli download Qwen/Qwen2.5-0.5B --local-dir Qwen2.5-0.5B "
-            f"--include config.json model.safetensors tokenizer.json\n"
-            f"(or set QWEN_MODEL_DIR to an existing model dir)"
-        )
-
     tok = Qwen2Tokenizer.from_pretrained(MODEL_DIR)
     eng = E.Engine.load(MODEL_DIR)
 
